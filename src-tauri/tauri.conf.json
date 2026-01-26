@@ -38,10 +38,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": [
-      "nsis",
-      "msi"
-    ],
+    "targets": "all",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -52,6 +49,12 @@
     "windows": {
       "certificateThumbprint": "3252C3BF6642EA3019D5FCA8D15776919B0F5A50",
       "timestampUrl": "http://timestamp.digicert.com"
+    },
+    "macOS": {
+      "signingIdentity": "Developer ID Application: Andreas Kalkusinski (9RN6UD7PMA)",
+      "entitlements": "entitlements.plist",
+      "infoPlist": "Info.plist",
+      "minimumSystemVersion": "10.15"
     },
     "publisher": "JeanTools"
   }
