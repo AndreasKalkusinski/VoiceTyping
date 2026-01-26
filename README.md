@@ -13,6 +13,7 @@ A modern, open-source desktop application for Speech-to-Text transcription with 
 - **System Tray**: Runs quietly in the background
 - **Transcription History**: Keep track of your past transcriptions
 - **Auto-start**: Optionally start with Windows
+- **Auto-Update**: Automatically checks for updates and installs them with one click
 - **Privacy-first**: Your API keys are stored locally, audio is sent directly to the provider
 
 ## Supported Models
@@ -82,6 +83,16 @@ npm run tauri:build
 | Google Gemini | Free (with rate limits) |
 | OpenAI Whisper | $0.006/min |
 | Mistral Voxtral | $0.001/min |
+
+## Auto-Updates
+
+Voice Typing automatically checks for updates once per day. When a new version is available:
+
+1. A notification appears in the **Settings** page
+2. Click **"Jetzt aktualisieren"** to download and install
+3. The app will restart automatically after installation
+
+You can also manually check for updates anytime via **Settings > Updates > Nach Updates suchen**.
 
 ## Tech Stack
 

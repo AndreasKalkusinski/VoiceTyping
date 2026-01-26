@@ -3,6 +3,8 @@ import { motion, AnimatePresence } from "motion/react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { register, unregister, unregisterAll } from "@tauri-apps/plugin-global-shortcut";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
+import { check } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import { APP_VERSION } from "./version";
 import appIcon from "./assets/icon.png";
 import "./App.css";
@@ -59,6 +61,16 @@ function App() {
   const [transcribedText, setTranscribedText] = useState("");
   const [copied, setCopied] = useState(false);
   const [autostartEnabled, setAutostartEnabled] = useState(false);
+
+  // Update state
+  const [updateAvailable, setUpdateAvailable] = useState<{ version: string; body?: string } | null>(null);
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+  const [isUpdating, setIsUpdating] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState(0);
+  const [lastUpdateCheck, setLastUpdateCheck] = useState<number>(() => {
+    const saved = localStorage.getItem("last_update_check");
+    return saved ? parseInt(saved) : 0;
+  });
 
   // STT Provider state
   const [selectedProvider, setSelectedProvider] = useState<STTProvider>(() => {
@@ -161,6 +173,84 @@ function App() {
       console.error("Failed to toggle autostart:", err);
     }
   };
+
+  // Check for updates
+  const checkForUpdates = useCallback(async (silent = false) => {
+    if (isCheckingUpdate || isUpdating) return;
+
+    setIsCheckingUpdate(true);
+    try {
+      const update = await check();
+      if (update) {
+        setUpdateAvailable({
+          version: update.version,
+          body: update.body || undefined
+        });
+      } else if (!silent) {
+        setUpdateAvailable(null);
+      }
+      const now = Date.now();
+      setLastUpdateCheck(now);
+      localStorage.setItem("last_update_check", now.toString());
+    } catch (err) {
+      console.error("Failed to check for updates:", err);
+    } finally {
+      setIsCheckingUpdate(false);
+    }
+  }, [isCheckingUpdate, isUpdating]);
+
+  // Download and install update
+  const downloadAndInstallUpdate = useCallback(async () => {
+    if (!updateAvailable || isUpdating) return;
+
+    setIsUpdating(true);
+    setUpdateProgress(0);
+
+    try {
+      const update = await check();
+      if (update) {
+        let downloaded = 0;
+        let contentLength = 0;
+
+        await update.downloadAndInstall((event) => {
+          switch (event.event) {
+            case "Started":
+              contentLength = event.data.contentLength || 0;
+              break;
+            case "Progress":
+              downloaded += event.data.chunkLength;
+              if (contentLength > 0) {
+                setUpdateProgress(Math.round((downloaded / contentLength) * 100));
+              }
+              break;
+            case "Finished":
+              setUpdateProgress(100);
+              break;
+          }
+        });
+
+        // Relaunch the app after update
+        await relaunch();
+      }
+    } catch (err) {
+      console.error("Failed to install update:", err);
+      setIsUpdating(false);
+    }
+  }, [updateAvailable, isUpdating]);
+
+  // Check for updates on mount (once per day)
+  useEffect(() => {
+    const ONE_DAY = 24 * 60 * 60 * 1000;
+    const timeSinceLastCheck = Date.now() - lastUpdateCheck;
+
+    if (timeSinceLastCheck > ONE_DAY) {
+      // Delay check by 5 seconds to let app load first
+      const timer = setTimeout(() => {
+        checkForUpdates(true);
+      }, 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [lastUpdateCheck, checkForUpdates]);
 
   // History management
   const saveToHistory = useCallback((text: string) => {
@@ -941,6 +1031,84 @@ function App() {
                 </p>
               </div>
 
+              {/* Update Section */}
+              <div className="glass rounded-2xl p-5 mb-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div>
+                    <h3 className="text-sm font-medium">Updates</h3>
+                    <p className="text-xs text-text-secondary mt-1">
+                      Aktuelle Version: v{APP_VERSION}
+                    </p>
+                  </div>
+                  {updateAvailable ? (
+                    <span className="px-2 py-1 bg-green-500/20 text-green-400 text-xs rounded-full">
+                      v{updateAvailable.version} verfügbar
+                    </span>
+                  ) : null}
+                </div>
+
+                {updateAvailable ? (
+                  <div className="space-y-3">
+                    {updateAvailable.body && (
+                      <div className="p-3 bg-white/5 rounded-lg text-xs text-text-secondary max-h-24 overflow-y-auto">
+                        {updateAvailable.body}
+                      </div>
+                    )}
+                    {isUpdating ? (
+                      <div className="space-y-2">
+                        <div className="h-2 bg-white/10 rounded-full overflow-hidden">
+                          <motion.div
+                            className="h-full bg-accent"
+                            initial={{ width: 0 }}
+                            animate={{ width: `${updateProgress}%` }}
+                          />
+                        </div>
+                        <p className="text-xs text-text-secondary text-center">
+                          {updateProgress < 100 ? `Herunterladen... ${updateProgress}%` : "Installiere..."}
+                        </p>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={downloadAndInstallUpdate}
+                        className="w-full py-2 px-4 bg-accent hover:bg-accent/80 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2"
+                      >
+                        <DownloadIcon />
+                        Jetzt aktualisieren
+                      </button>
+                    )}
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => checkForUpdates(false)}
+                    disabled={isCheckingUpdate}
+                    className="w-full py-2 px-4 bg-white/5 hover:bg-white/10 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+                  >
+                    {isCheckingUpdate ? (
+                      <>
+                        <LoadingSpinner />
+                        Prüfe...
+                      </>
+                    ) : (
+                      <>
+                        <RefreshIcon />
+                        Nach Updates suchen
+                      </>
+                    )}
+                  </button>
+                )}
+
+                {lastUpdateCheck > 0 && !updateAvailable && !isCheckingUpdate && (
+                  <p className="text-xs text-text-secondary/70 mt-3 text-center">
+                    Zuletzt geprüft: {new Date(lastUpdateCheck).toLocaleDateString("de-DE", {
+                      day: "2-digit",
+                      month: "2-digit",
+                      hour: "2-digit",
+                      minute: "2-digit"
+                    })}
+                  </p>
+                )}
+              </div>
+
               {/* History Section */}
               <div className="glass rounded-2xl p-5 mb-4">
                 <div className="flex items-center justify-between mb-3">
@@ -1364,6 +1532,27 @@ function ChevronIcon({ expanded }: { expanded: boolean }) {
     >
       <path d="m6 9 6 6 6-6" />
     </motion.svg>
+  );
+}
+
+function DownloadIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="7 10 12 15 17 10" />
+      <line x1="12" x2="12" y1="15" y2="3" />
+    </svg>
+  );
+}
+
+function RefreshIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+      <path d="M21 3v5h-5" />
+      <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+      <path d="M8 16H3v5" />
+    </svg>
   );
 }
 

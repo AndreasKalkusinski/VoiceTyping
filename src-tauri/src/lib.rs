@@ -14,6 +14,8 @@ pub fn run() {
             MacosLauncher::LaunchAgent,
             Some(vec!["--autostart"]), // Pass argument when started via autostart
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             // Check if started via autostart - if so, hide the window
             let args: Vec<String> = std::env::args().collect();
