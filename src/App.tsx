@@ -5,9 +5,15 @@ import { register, unregister, unregisterAll } from "@tauri-apps/plugin-global-s
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { APP_VERSION } from "./version";
 import appIcon from "./assets/icon.png";
 import "./App.css";
+
+// Platform detection
+const isMacOS = navigator.platform.toUpperCase().indexOf("MAC") >= 0;
+const HOTKEY = isMacOS ? "cmd+y" : "ctrl+y";
+const HOTKEY_DISPLAY = isMacOS ? "⌘Y" : "Ctrl+Y";
 
 type View = "main" | "settings" | "history";
 type ApiKeyStatus = "idle" | "validating" | "valid" | "invalid";
@@ -61,6 +67,7 @@ function App() {
   const [transcribedText, setTranscribedText] = useState("");
   const [copied, setCopied] = useState(false);
   const [autostartEnabled, setAutostartEnabled] = useState(false);
+  const [autostartError, setAutostartError] = useState<string | null>(null);
 
   // Update state
   const [updateAvailable, setUpdateAvailable] = useState<{ version: string; body?: string } | null>(null);
@@ -161,16 +168,37 @@ function App() {
 
   // Toggle autostart
   const toggleAutostart = async () => {
+    setAutostartError(null);
     try {
       if (autostartEnabled) {
         await disable();
         setAutostartEnabled(false);
       } else {
         await enable();
-        setAutostartEnabled(true);
+        // Verify it was actually enabled
+        const nowEnabled = await isEnabled();
+        if (nowEnabled) {
+          setAutostartEnabled(true);
+        } else {
+          // On macOS, user might need to grant permission
+          if (isMacOS) {
+            setAutostartError(
+              "Autostart konnte nicht aktiviert werden. Bitte erlaube Voice Typing in den Systemeinstellungen unter \"Anmeldeobjekte\"."
+            );
+          } else {
+            setAutostartError("Autostart konnte nicht aktiviert werden.");
+          }
+        }
       }
     } catch (err) {
       console.error("Failed to toggle autostart:", err);
+      if (isMacOS) {
+        setAutostartError(
+          "Autostart konnte nicht aktiviert werden. Bitte erlaube Voice Typing in den Systemeinstellungen unter \"Anmeldeobjekte\"."
+        );
+      } else {
+        setAutostartError("Fehler beim Aktivieren des Autostarts.");
+      }
     }
   };
 
@@ -425,9 +453,8 @@ function App() {
     }
   }, [updateProviderConfig, fetchModelsForProvider]);
 
-  // Register global hotkey Ctrl+Y (only once, use refs for current state)
+  // Register global hotkey (Ctrl+Y on Windows, Cmd+Y on macOS)
   useEffect(() => {
-    const HOTKEY = "ctrl+y";
     const COOLDOWN_MS = 300; // Prevent double-triggers
 
     const setupHotkey = async () => {
@@ -915,8 +942,8 @@ function App() {
                 {isTranscribing
                   ? "Transkribiere..."
                   : isRecording
-                  ? "Aufnahme läuft... Klicken oder Ctrl+Y zum Stoppen"
-                  : "Klicken oder Ctrl+Y zum Aufnehmen"}
+                  ? `Aufnahme läuft... Klicken oder ${HOTKEY_DISPLAY} zum Stoppen`
+                  : `Klicken oder ${HOTKEY_DISPLAY} zum Aufnehmen`}
               </p>
 
               {/* Text area - grows to fill space */}
@@ -1010,7 +1037,9 @@ function App() {
                   <div>
                     <h3 className="text-sm font-medium">Autostart</h3>
                     <p className="text-xs text-text-secondary mt-1">
-                      App beim Windows-Start automatisch starten
+                      {isMacOS
+                        ? "App beim Mac-Start automatisch starten"
+                        : "App beim Windows-Start automatisch starten"}
                     </p>
                   </div>
                   <button
@@ -1026,8 +1055,21 @@ function App() {
                     />
                   </button>
                 </div>
+                {autostartError && (
+                  <div className="mt-3 p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
+                    <p className="text-xs text-yellow-400">{autostartError}</p>
+                    {isMacOS && (
+                      <button
+                        onClick={() => openUrl("x-apple.systempreferences:com.apple.LoginItems-Settings.extension")}
+                        className="text-xs text-accent hover:underline mt-2 inline-block"
+                      >
+                        Systemeinstellungen öffnen
+                      </button>
+                    )}
+                  </div>
+                )}
                 <p className="text-xs text-text-secondary/70 mt-3">
-                  Startet im Hintergrund - nutze Ctrl+Y zum Aktivieren
+                  Startet im Hintergrund - nutze {HOTKEY_DISPLAY} zum Aktivieren
                 </p>
               </div>
 
