@@ -12,9 +12,9 @@ import "./App.css";
 
 // Platform detection
 const isMacOS = navigator.platform.toUpperCase().indexOf("MAC") >= 0;
-// Register both Y and Z to handle German keyboard layout (Y/Z swapped)
-const HOTKEYS = isMacOS ? ["cmd+y", "cmd+z"] : ["ctrl+y", "ctrl+z"];
-const HOTKEY_DISPLAY = isMacOS ? "⌘Y" : "Ctrl+Y";
+// Use R for Recording - works on all keyboard layouts (DE, US, etc.)
+const HOTKEY = isMacOS ? "cmd+r" : "ctrl+r";
+const HOTKEY_DISPLAY = isMacOS ? "⌘R" : "Ctrl+R";
 
 type View = "main" | "settings" | "history";
 type ApiKeyStatus = "idle" | "validating" | "valid" | "invalid";
@@ -608,7 +608,7 @@ function App() {
       }
     };
 
-    const setupHotkeys = async () => {
+    const setupHotkey = async () => {
       try {
         // First unregister ALL hotkeys to clear any lingering registrations
         try {
@@ -618,24 +618,18 @@ function App() {
           // Ignore errors
         }
 
-        // Register both Y and Z variants for German keyboard layout compatibility
-        for (const hotkey of HOTKEYS) {
-          console.log("Registering hotkey:", hotkey);
-          await register(hotkey, hotkeyHandler);
-        }
+        console.log("Registering hotkey:", HOTKEY);
+        await register(HOTKEY, hotkeyHandler);
       } catch (err) {
         // Ignore "already registered" errors - hotkey still works
         console.log("Hotkey registration note:", err);
       }
     };
 
-    setupHotkeys();
+    setupHotkey();
 
     return () => {
-      // Unregister all hotkeys on cleanup
-      for (const hotkey of HOTKEYS) {
-        unregister(hotkey).catch(console.error);
-      }
+      unregister(HOTKEY).catch(console.error);
     };
   }, []); // Empty dependencies - register only once
 
