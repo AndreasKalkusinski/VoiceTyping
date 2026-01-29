@@ -12,9 +12,9 @@ import "./App.css";
 
 // Platform detection
 const isMacOS = navigator.platform.toUpperCase().indexOf("MAC") >= 0;
-// Use R for Recording - works on all keyboard layouts (DE, US, etc.)
-const HOTKEY = isMacOS ? "cmd+r" : "ctrl+r";
-const HOTKEY_DISPLAY = isMacOS ? "⌘R" : "Ctrl+R";
+// Use D for Dictation - works on all keyboard layouts
+const HOTKEY = isMacOS ? "cmd+d" : "ctrl+d";
+const HOTKEY_DISPLAY = isMacOS ? "⌘D" : "Ctrl+D";
 
 type View = "main" | "settings" | "history";
 type ApiKeyStatus = "idle" | "validating" | "valid" | "invalid";
@@ -157,6 +157,7 @@ function App() {
   const transcribedTextRef = useRef(transcribedText);
   const selectedProviderRef = useRef(selectedProvider);
   const currentConfigRef = useRef(currentConfig);
+  const selectedDeviceIdRef = useRef(selectedDeviceId);
   const lastHotkeyTimeRef = useRef(0); // Cooldown to prevent double-triggers
 
   // Keep refs in sync with state
@@ -166,6 +167,7 @@ function App() {
   useEffect(() => { transcribedTextRef.current = transcribedText; }, [transcribedText]);
   useEffect(() => { selectedProviderRef.current = selectedProvider; }, [selectedProvider]);
   useEffect(() => { currentConfigRef.current = currentConfig; }, [currentConfig]);
+  useEffect(() => { selectedDeviceIdRef.current = selectedDeviceId; }, [selectedDeviceId]);
 
   // Validate API key on mount if one exists
   useEffect(() => {
@@ -183,17 +185,23 @@ function App() {
   useEffect(() => {
     const loadDevices = async () => {
       try {
+        console.log("Loading audio devices...");
         // Request permission first to get device labels
         await navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
           stream.getTracks().forEach(track => track.stop());
         });
         const devices = await navigator.mediaDevices.enumerateDevices();
         const audioInputs = devices.filter(d => d.kind === "audioinput");
+        console.log("Found audio devices:", audioInputs.map(d => ({ id: d.deviceId, label: d.label })));
         setAudioDevices(audioInputs);
 
-        // If no device selected, use default
-        if (!selectedDeviceId && audioInputs.length > 0) {
+        // If no device selected or saved device not found, use default
+        const savedDeviceId = localStorage.getItem("selected_audio_device") || "";
+        const deviceExists = audioInputs.some(d => d.deviceId === savedDeviceId);
+        if (!deviceExists && audioInputs.length > 0) {
+          console.log("Setting default device:", audioInputs[0].label);
           setSelectedDeviceId(audioInputs[0].deviceId);
+          localStorage.setItem("selected_audio_device", audioInputs[0].deviceId);
         }
       } catch (err) {
         console.error("Failed to load audio devices:", err);
@@ -211,12 +219,15 @@ function App() {
   // Audio level monitoring
   const startAudioLevelMonitoring = useCallback(async (stream: MediaStream) => {
     try {
+      console.log("Creating AudioContext...");
       audioContextRef.current = new AudioContext();
       analyserRef.current = audioContextRef.current.createAnalyser();
       analyserRef.current.fftSize = 256;
+      analyserRef.current.smoothingTimeConstant = 0.3;
 
       const source = audioContextRef.current.createMediaStreamSource(stream);
       source.connect(analyserRef.current);
+      console.log("AudioContext created, analyser connected");
 
       const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
 
@@ -224,11 +235,16 @@ function App() {
         if (!analyserRef.current) return;
         analyserRef.current.getByteFrequencyData(dataArray);
         const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
-        setAudioLevel(Math.min(100, average * 1.5)); // Normalize to 0-100
+        const level = Math.min(100, average * 2); // Normalize to 0-100
+        if (level > 0) {
+          console.log("Audio level:", level.toFixed(1));
+        }
+        setAudioLevel(level);
         animationFrameRef.current = requestAnimationFrame(updateLevel);
       };
 
       updateLevel();
+      console.log("Audio level monitoring started");
     } catch (err) {
       console.error("Failed to start audio monitoring:", err);
     }
@@ -576,7 +592,39 @@ function App() {
       } else if (currentApiKey && !currentIsTranscribing) {
         // Start recording
         try {
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          // Use selected device
+          const deviceId = selectedDeviceIdRef.current;
+          const constraints: MediaStreamConstraints = {
+            audio: deviceId ? { deviceId: { exact: deviceId } } : true
+          };
+          console.log("Hotkey: getUserMedia constraints:", constraints);
+          const stream = await navigator.mediaDevices.getUserMedia(constraints);
+          console.log("Hotkey: Got stream:", stream.getAudioTracks().map(t => ({ label: t.label, enabled: t.enabled })));
+          streamRef.current = stream;
+
+          // Start audio level monitoring
+          if (audioContextRef.current) {
+            audioContextRef.current.close();
+          }
+          const audioContext = new AudioContext();
+          audioContextRef.current = audioContext;
+          const analyser = audioContext.createAnalyser();
+          analyserRef.current = analyser;
+          analyser.fftSize = 256;
+          analyser.smoothingTimeConstant = 0.3;
+          const source = audioContext.createMediaStreamSource(stream);
+          source.connect(analyser);
+          const dataArray = new Uint8Array(analyser.frequencyBinCount);
+          const updateLevel = () => {
+            if (!analyserRef.current) return;
+            analyserRef.current.getByteFrequencyData(dataArray);
+            const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
+            const level = Math.min(100, average * 2);
+            setAudioLevel(level);
+            animationFrameRef.current = requestAnimationFrame(updateLevel);
+          };
+          updateLevel();
+
           const mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
           mediaRecorderRef.current = mediaRecorder;
           chunksRef.current = [];
@@ -597,10 +645,21 @@ function App() {
           mediaRecorder.onstop = async () => {
             const audioBlob = new Blob(chunksRef.current, { type: "audio/webm" });
             stream.getTracks().forEach((track) => track.stop());
+            // Stop audio monitoring
+            if (animationFrameRef.current) {
+              cancelAnimationFrame(animationFrameRef.current);
+              animationFrameRef.current = null;
+            }
+            if (audioContextRef.current) {
+              audioContextRef.current.close();
+              audioContextRef.current = null;
+            }
+            analyserRef.current = null;
+            setAudioLevel(0);
             await transcribeAudioFromHotkey(audioBlob);
           };
 
-          mediaRecorder.start();
+          mediaRecorder.start(100);
           setIsRecording(true);
         } catch (err) {
           console.error("Microphone error:", err);
@@ -647,6 +706,8 @@ function App() {
   }, [updateProviderConfig, validateProviderApiKey]);
 
   const startRecording = useCallback(async () => {
+    console.log("startRecording called, apiKey:", !!apiKey, "selectedDeviceId:", selectedDeviceId);
+
     if (!apiKey) {
       setTranscribedText("Bitte API Key in den Settings hinterlegen");
       return;
@@ -664,10 +725,13 @@ function App() {
       const constraints: MediaStreamConstraints = {
         audio: selectedDeviceId ? { deviceId: { exact: selectedDeviceId } } : true
       };
+      console.log("getUserMedia constraints:", constraints);
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      console.log("Got stream:", stream.getAudioTracks().map(t => ({ label: t.label, enabled: t.enabled })));
       streamRef.current = stream;
 
       // Start audio level monitoring
+      console.log("Starting audio level monitoring...");
       startAudioLevelMonitoring(stream);
 
       const mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
@@ -675,19 +739,23 @@ function App() {
       chunksRef.current = [];
 
       mediaRecorder.ondataavailable = (e) => {
+        console.log("ondataavailable:", e.data.size, "bytes");
         if (e.data.size > 0) {
           chunksRef.current.push(e.data);
         }
       };
 
       mediaRecorder.onstop = async () => {
+        console.log("Recording stopped, chunks:", chunksRef.current.length);
         const audioBlob = new Blob(chunksRef.current, { type: "audio/webm" });
+        console.log("Audio blob size:", audioBlob.size);
         stream.getTracks().forEach((track) => track.stop());
         stopAudioLevelMonitoring();
         await transcribeAudio(audioBlob);
       };
 
-      mediaRecorder.start();
+      mediaRecorder.start(100); // Collect data every 100ms
+      console.log("MediaRecorder started");
       setIsRecording(true);
     } catch (err) {
       console.error("Error accessing microphone:", err);
@@ -957,11 +1025,52 @@ function App() {
     }
   }, [transcribedText]);
 
+  // Hide window to tray, stopping any recording first
+  const hideToTray = useCallback(async () => {
+    // Stop recording if in progress
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+    }
+    // Stop audio monitoring
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+    if (audioContextRef.current) {
+      audioContextRef.current.close();
+      audioContextRef.current = null;
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
+    analyserRef.current = null;
+    setAudioLevel(0);
+    // Hide window
+    await getCurrentWindow().hide();
+  }, [isRecording]);
+
   return (
     <div className="h-full bg-gradient-dark flex flex-col">
       {/* Title bar / drag region */}
-      <div data-tauri-drag-region className="drag-region h-8 flex items-center justify-between px-4">
-        <div className="flex items-center gap-2">
+      <div
+        data-tauri-drag-region
+        className="drag-region h-8 flex items-center justify-between px-4 select-none"
+        onMouseDown={async (e) => {
+          // Only start dragging if not clicking on a button
+          if ((e.target as HTMLElement).closest('button')) return;
+          if ((e.target as HTMLElement).closest('.no-drag')) return;
+          e.preventDefault();
+          e.stopPropagation();
+          try {
+            await getCurrentWindow().startDragging();
+          } catch (err) {
+            console.error("Drag error:", err);
+          }
+        }}
+      >
+        <div className="flex items-center gap-2 pointer-events-none">
           <img src={appIcon} alt="Voice Typing" className="w-4 h-4" />
           <span className="text-xs text-text-secondary font-medium tracking-wide">
             VOICE TYPING
@@ -990,7 +1099,7 @@ function App() {
             <MinimizeIcon />
           </button>
           <button
-            onClick={() => getCurrentWindow().hide()}
+            onClick={hideToTray}
             className="no-drag p-1.5 rounded-lg hover:bg-red-500/20 hover:text-red-400 transition-colors"
             title="In Tray minimieren"
           >
@@ -1008,7 +1117,7 @@ function App() {
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -10 }}
-              className="w-full max-w-md flex-1 flex flex-col items-center gap-4 overflow-hidden"
+              className="w-full max-w-md flex-1 flex flex-col items-center gap-4 overflow-hidden pt-4"
             >
               {/* Record Button */}
               <div className="relative shrink-0 flex flex-col items-center">
@@ -1158,7 +1267,7 @@ function App() {
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -10 }}
-              className="w-full max-w-md flex-1 overflow-y-auto pr-1"
+              className="w-full max-w-md flex-1 overflow-y-auto pr-1 pt-4"
             >
               {/* App Header / About */}
               <div className="glass rounded-2xl p-5 mb-4">
@@ -1501,7 +1610,7 @@ function App() {
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -10 }}
-              className="w-full max-w-md flex-1 flex flex-col overflow-hidden"
+              className="w-full max-w-md flex-1 flex flex-col overflow-hidden pt-4"
             >
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-xl font-semibold">Verlauf</h2>

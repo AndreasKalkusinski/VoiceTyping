@@ -5,6 +5,26 @@ use tauri::{
 };
 use tauri_plugin_autostart::MacosLauncher;
 
+#[cfg(target_os = "macos")]
+use cocoa::appkit::{NSApp, NSApplication, NSApplicationActivationPolicy};
+
+#[cfg(target_os = "macos")]
+fn set_dock_visible(visible: bool) {
+    unsafe {
+        let app = NSApp();
+        if visible {
+            app.setActivationPolicy_(NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular);
+        } else {
+            app.setActivationPolicy_(NSApplicationActivationPolicy::NSApplicationActivationPolicyAccessory);
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_dock_visible(_visible: bool) {
+    // No-op on other platforms - skipTaskbar in config handles Windows
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -17,13 +37,17 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
-            // Check if started via autostart - if so, hide the window
+            // Check if started via autostart - if so, hide the window and dock icon
             let args: Vec<String> = std::env::args().collect();
-            if args.contains(&"--autostart".to_string()) {
+            let is_autostart = args.contains(&"--autostart".to_string());
+
+            if is_autostart {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.hide();
                 }
+                set_dock_visible(false);
             }
+
             // Create tray menu
             let show = MenuItem::with_id(app, "show", "Anzeigen", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Beenden", true, None::<&str>)?;
@@ -37,6 +61,7 @@ pub fn run() {
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => {
                         if let Some(window) = app.get_webview_window("main") {
+                            set_dock_visible(true);
                             let _ = window.show();
                             let _ = window.set_focus();
                         }
@@ -55,6 +80,7 @@ pub fn run() {
                     {
                         let app = tray.app_handle();
                         if let Some(window) = app.get_webview_window("main") {
+                            set_dock_visible(true);
                             let _ = window.show();
                             let _ = window.set_focus();
                         }
@@ -68,6 +94,7 @@ pub fn run() {
             // Hide window instead of closing when X is clicked
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 window.hide().unwrap();
+                set_dock_visible(false);
                 api.prevent_close();
             }
         })
