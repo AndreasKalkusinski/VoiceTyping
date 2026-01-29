@@ -12,7 +12,8 @@ import "./App.css";
 
 // Platform detection
 const isMacOS = navigator.platform.toUpperCase().indexOf("MAC") >= 0;
-const HOTKEY = isMacOS ? "cmd+y" : "ctrl+y";
+// Register both Y and Z to handle German keyboard layout (Y/Z swapped)
+const HOTKEYS = isMacOS ? ["cmd+y", "cmd+z"] : ["ctrl+y", "ctrl+z"];
 const HOTKEY_DISPLAY = isMacOS ? "⌘Y" : "Ctrl+Y";
 
 type View = "main" | "settings" | "history";
@@ -137,6 +138,18 @@ function App() {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const cursorPositionRef = useRef<number>(0);
 
+  // Audio device state
+  const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string>(() => {
+    return localStorage.getItem("selected_audio_device") || "";
+  });
+  const [audioLevel, setAudioLevel] = useState(0);
+  const [showDeviceDropdown, setShowDeviceDropdown] = useState(false);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const animationFrameRef = useRef<number | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+
   // Refs to access current state in hotkey callback
   const isRecordingRef = useRef(isRecording);
   const apiKeyRef = useRef(apiKey);
@@ -164,6 +177,81 @@ function App() {
   // Check autostart status on mount
   useEffect(() => {
     isEnabled().then(setAutostartEnabled).catch(console.error);
+  }, []);
+
+  // Load audio devices on mount
+  useEffect(() => {
+    const loadDevices = async () => {
+      try {
+        // Request permission first to get device labels
+        await navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+          stream.getTracks().forEach(track => track.stop());
+        });
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const audioInputs = devices.filter(d => d.kind === "audioinput");
+        setAudioDevices(audioInputs);
+
+        // If no device selected, use default
+        if (!selectedDeviceId && audioInputs.length > 0) {
+          setSelectedDeviceId(audioInputs[0].deviceId);
+        }
+      } catch (err) {
+        console.error("Failed to load audio devices:", err);
+      }
+    };
+    loadDevices();
+
+    // Listen for device changes
+    navigator.mediaDevices.addEventListener("devicechange", loadDevices);
+    return () => {
+      navigator.mediaDevices.removeEventListener("devicechange", loadDevices);
+    };
+  }, []);
+
+  // Audio level monitoring
+  const startAudioLevelMonitoring = useCallback(async (stream: MediaStream) => {
+    try {
+      audioContextRef.current = new AudioContext();
+      analyserRef.current = audioContextRef.current.createAnalyser();
+      analyserRef.current.fftSize = 256;
+
+      const source = audioContextRef.current.createMediaStreamSource(stream);
+      source.connect(analyserRef.current);
+
+      const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
+
+      const updateLevel = () => {
+        if (!analyserRef.current) return;
+        analyserRef.current.getByteFrequencyData(dataArray);
+        const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
+        setAudioLevel(Math.min(100, average * 1.5)); // Normalize to 0-100
+        animationFrameRef.current = requestAnimationFrame(updateLevel);
+      };
+
+      updateLevel();
+    } catch (err) {
+      console.error("Failed to start audio monitoring:", err);
+    }
+  }, []);
+
+  const stopAudioLevelMonitoring = useCallback(() => {
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+    if (audioContextRef.current) {
+      audioContextRef.current.close();
+      audioContextRef.current = null;
+    }
+    analyserRef.current = null;
+    setAudioLevel(0);
+  }, []);
+
+  // Save selected device to localStorage
+  const handleDeviceSelect = useCallback((deviceId: string) => {
+    setSelectedDeviceId(deviceId);
+    localStorage.setItem("selected_audio_device", deviceId);
+    setShowDeviceDropdown(false);
   }, []);
 
   // Toggle autostart
@@ -454,10 +542,73 @@ function App() {
   }, [updateProviderConfig, fetchModelsForProvider]);
 
   // Register global hotkey (Ctrl+Y on Windows, Cmd+Y on macOS)
+  // Also register Z variant for German keyboard layout (Y/Z swapped)
   useEffect(() => {
     const COOLDOWN_MS = 300; // Prevent double-triggers
 
-    const setupHotkey = async () => {
+    const hotkeyHandler = async () => {
+      console.log("Hotkey triggered!");
+      // Cooldown check to prevent rapid double-triggers
+      const now = Date.now();
+      if (now - lastHotkeyTimeRef.current < COOLDOWN_MS) {
+        console.log("Hotkey cooldown - ignoring");
+        return;
+      }
+      lastHotkeyTimeRef.current = now;
+
+      // Show window first
+      const win = getCurrentWindow();
+      await win.show();
+      await win.setFocus();
+
+      // Use refs to get current state values
+      const currentIsRecording = isRecordingRef.current;
+      const currentApiKey = apiKeyRef.current;
+      const currentIsTranscribing = isTranscribingRef.current;
+      const currentTranscribedText = transcribedTextRef.current;
+
+      // Toggle recording
+      if (currentIsRecording) {
+        if (mediaRecorderRef.current) {
+          mediaRecorderRef.current.stop();
+          setIsRecording(false);
+        }
+      } else if (currentApiKey && !currentIsTranscribing) {
+        // Start recording
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          const mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+          mediaRecorderRef.current = mediaRecorder;
+          chunksRef.current = [];
+
+          // Save cursor position
+          if (textareaRef.current) {
+            cursorPositionRef.current = textareaRef.current.selectionStart ?? currentTranscribedText.length;
+          } else {
+            cursorPositionRef.current = currentTranscribedText.length;
+          }
+
+          mediaRecorder.ondataavailable = (e) => {
+            if (e.data.size > 0) {
+              chunksRef.current.push(e.data);
+            }
+          };
+
+          mediaRecorder.onstop = async () => {
+            const audioBlob = new Blob(chunksRef.current, { type: "audio/webm" });
+            stream.getTracks().forEach((track) => track.stop());
+            await transcribeAudioFromHotkey(audioBlob);
+          };
+
+          mediaRecorder.start();
+          setIsRecording(true);
+        } catch (err) {
+          console.error("Microphone error:", err);
+        }
+      }
+    };
+
+    const setupHotkeys = async () => {
       try {
         // First unregister ALL hotkeys to clear any lingering registrations
         try {
@@ -467,79 +618,24 @@ function App() {
           // Ignore errors
         }
 
-        console.log("Registering hotkey:", HOTKEY);
-        await register(HOTKEY, async () => {
-          console.log("Hotkey triggered!");
-          // Cooldown check to prevent rapid double-triggers
-          const now = Date.now();
-          if (now - lastHotkeyTimeRef.current < COOLDOWN_MS) {
-            console.log("Hotkey cooldown - ignoring");
-            return;
-          }
-          lastHotkeyTimeRef.current = now;
-
-          // Show window first
-          const win = getCurrentWindow();
-          await win.show();
-          await win.setFocus();
-
-          // Use refs to get current state values
-          const currentIsRecording = isRecordingRef.current;
-          const currentApiKey = apiKeyRef.current;
-          const currentIsTranscribing = isTranscribingRef.current;
-          const currentTranscribedText = transcribedTextRef.current;
-
-          // Toggle recording
-          if (currentIsRecording) {
-            if (mediaRecorderRef.current) {
-              mediaRecorderRef.current.stop();
-              setIsRecording(false);
-            }
-          } else if (currentApiKey && !currentIsTranscribing) {
-            // Start recording - use the unified startRecording function via button click simulation
-            // For hotkey, we use batch mode directly to avoid async issues
-            try {
-              const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-              const mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
-              mediaRecorderRef.current = mediaRecorder;
-              chunksRef.current = [];
-
-              // Save cursor position
-              if (textareaRef.current) {
-                cursorPositionRef.current = textareaRef.current.selectionStart ?? currentTranscribedText.length;
-              } else {
-                cursorPositionRef.current = currentTranscribedText.length;
-              }
-
-              mediaRecorder.ondataavailable = (e) => {
-                if (e.data.size > 0) {
-                  chunksRef.current.push(e.data);
-                }
-              };
-
-              mediaRecorder.onstop = async () => {
-                const audioBlob = new Blob(chunksRef.current, { type: "audio/webm" });
-                stream.getTracks().forEach((track) => track.stop());
-                await transcribeAudioFromHotkey(audioBlob);
-              };
-
-              mediaRecorder.start();
-              setIsRecording(true);
-            } catch (err) {
-              console.error("Microphone error:", err);
-            }
-          }
-        });
+        // Register both Y and Z variants for German keyboard layout compatibility
+        for (const hotkey of HOTKEYS) {
+          console.log("Registering hotkey:", hotkey);
+          await register(hotkey, hotkeyHandler);
+        }
       } catch (err) {
         // Ignore "already registered" errors - hotkey still works
         console.log("Hotkey registration note:", err);
       }
     };
 
-    setupHotkey();
+    setupHotkeys();
 
     return () => {
-      unregister(HOTKEY).catch(console.error);
+      // Unregister all hotkeys on cleanup
+      for (const hotkey of HOTKEYS) {
+        unregister(hotkey).catch(console.error);
+      }
     };
   }, []); // Empty dependencies - register only once
 
@@ -570,7 +666,16 @@ function App() {
     }
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Use selected device or default
+      const constraints: MediaStreamConstraints = {
+        audio: selectedDeviceId ? { deviceId: { exact: selectedDeviceId } } : true
+      };
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      streamRef.current = stream;
+
+      // Start audio level monitoring
+      startAudioLevelMonitoring(stream);
+
       const mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
       mediaRecorderRef.current = mediaRecorder;
       chunksRef.current = [];
@@ -584,6 +689,7 @@ function App() {
       mediaRecorder.onstop = async () => {
         const audioBlob = new Blob(chunksRef.current, { type: "audio/webm" });
         stream.getTracks().forEach((track) => track.stop());
+        stopAudioLevelMonitoring();
         await transcribeAudio(audioBlob);
       };
 
@@ -593,14 +699,15 @@ function App() {
       console.error("Error accessing microphone:", err);
       setTranscribedText("Mikrofon-Zugriff verweigert. Bitte Berechtigung erteilen.");
     }
-  }, [apiKey, transcribedText]);
+  }, [apiKey, transcribedText, selectedDeviceId, startAudioLevelMonitoring, stopAudioLevelMonitoring]);
 
   const stopRecording = useCallback(() => {
     if (mediaRecorderRef.current && isRecording) {
       mediaRecorderRef.current.stop();
       setIsRecording(false);
+      stopAudioLevelMonitoring();
     }
-  }, [isRecording]);
+  }, [isRecording, stopAudioLevelMonitoring]);
 
   const insertTextAtCursor = useCallback((newText: string) => {
     const pos = cursorPositionRef.current;
@@ -859,7 +966,7 @@ function App() {
   return (
     <div className="h-full bg-gradient-dark flex flex-col">
       {/* Title bar / drag region */}
-      <div className="drag-region h-8 flex items-center justify-between px-4">
+      <div data-tauri-drag-region className="drag-region h-8 flex items-center justify-between px-4">
         <div className="flex items-center gap-2">
           <img src={appIcon} alt="Voice Typing" className="w-4 h-4" />
           <span className="text-xs text-text-secondary font-medium tracking-wide">
@@ -910,32 +1017,91 @@ function App() {
               className="w-full max-w-md flex-1 flex flex-col items-center gap-4 overflow-hidden"
             >
               {/* Record Button */}
-              <div className="relative shrink-0">
+              <div className="relative shrink-0 flex flex-col items-center">
+                <div className="relative">
+                  {isRecording && (
+                    <motion.div
+                      className="absolute inset-0 rounded-full bg-recording animate-pulse-ring"
+                      initial={{ scale: 1, opacity: 0.8 }}
+                    />
+                  )}
+                  <motion.button
+                    onClick={isRecording ? stopRecording : startRecording}
+                    disabled={isTranscribing}
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    className={`relative w-24 h-24 rounded-full flex items-center justify-center transition-all duration-300 disabled:opacity-50 ${
+                      isRecording
+                        ? "bg-recording glow-recording"
+                        : isTranscribing
+                        ? "bg-yellow-500"
+                        : "bg-accent glow-accent hover:brightness-110"
+                    }`}
+                  >
+                    {isTranscribing ? (
+                      <LoadingIcon />
+                    ) : (
+                      <MicIcon recording={isRecording} />
+                    )}
+                  </motion.button>
+                </div>
+
+                {/* Audio Level Indicator */}
                 {isRecording && (
                   <motion.div
-                    className="absolute inset-0 rounded-full bg-recording animate-pulse-ring"
-                    initial={{ scale: 1, opacity: 0.8 }}
-                  />
+                    initial={{ opacity: 0, y: -5 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="mt-3 w-32 h-2 bg-white/10 rounded-full overflow-hidden"
+                  >
+                    <motion.div
+                      className="h-full bg-gradient-to-r from-green-500 via-yellow-500 to-red-500 rounded-full"
+                      style={{ width: `${audioLevel}%` }}
+                      transition={{ duration: 0.05 }}
+                    />
+                  </motion.div>
                 )}
-                <motion.button
-                  onClick={isRecording ? stopRecording : startRecording}
-                  disabled={isTranscribing}
-                  whileHover={{ scale: 1.05 }}
-                  whileTap={{ scale: 0.95 }}
-                  className={`relative w-24 h-24 rounded-full flex items-center justify-center transition-all duration-300 disabled:opacity-50 ${
-                    isRecording
-                      ? "bg-recording glow-recording"
-                      : isTranscribing
-                      ? "bg-yellow-500"
-                      : "bg-accent glow-accent hover:brightness-110"
-                  }`}
-                >
-                  {isTranscribing ? (
-                    <LoadingIcon />
-                  ) : (
-                    <MicIcon recording={isRecording} />
-                  )}
-                </motion.button>
+
+                {/* Microphone Dropdown */}
+                <div className="relative mt-2">
+                  <button
+                    onClick={() => setShowDeviceDropdown(!showDeviceDropdown)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 transition-colors text-xs text-text-secondary"
+                  >
+                    <MicSmallIcon />
+                    <span className="max-w-[140px] truncate">
+                      {audioDevices.find(d => d.deviceId === selectedDeviceId)?.label || "Standard-Mikrofon"}
+                    </span>
+                    <ChevronIcon expanded={showDeviceDropdown} />
+                  </button>
+
+                  <AnimatePresence>
+                    {showDeviceDropdown && (
+                      <motion.div
+                        initial={{ opacity: 0, y: -5, scale: 0.95 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: -5, scale: 0.95 }}
+                        className="absolute top-full left-1/2 -translate-x-1/2 mt-1 w-56 py-1 bg-bg-secondary border border-white/10 rounded-lg shadow-xl z-50"
+                      >
+                        {audioDevices.map((device) => (
+                          <button
+                            key={device.deviceId}
+                            onClick={() => handleDeviceSelect(device.deviceId)}
+                            className={`w-full px-3 py-2 text-left text-xs transition-colors ${
+                              selectedDeviceId === device.deviceId
+                                ? "bg-accent/20 text-accent"
+                                : "text-text-secondary hover:bg-white/5"
+                            }`}
+                          >
+                            <span className="block truncate">{device.label || "Unbekanntes Mikrofon"}</span>
+                          </button>
+                        ))}
+                        {audioDevices.length === 0 && (
+                          <p className="px-3 py-2 text-xs text-text-secondary/50">Keine Mikrofone gefunden</p>
+                        )}
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
               </div>
 
               <p className="text-text-secondary text-sm text-center shrink-0">
@@ -1413,6 +1579,15 @@ function App() {
 }
 
 // Icons
+function MicSmallIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+      <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+    </svg>
+  );
+}
+
 function MicIcon({ recording }: { recording: boolean }) {
   return (
     <motion.svg
