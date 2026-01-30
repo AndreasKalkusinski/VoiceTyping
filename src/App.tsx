@@ -181,40 +181,42 @@ function App() {
     isEnabled().then(setAutostartEnabled).catch(console.error);
   }, []);
 
+  // Load audio devices function (reusable)
+  const loadAudioDevices = useCallback(async () => {
+    try {
+      console.log("Loading audio devices...");
+      // Request permission first to get device labels
+      await navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+        stream.getTracks().forEach(track => track.stop());
+      });
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const audioInputs = devices.filter(d => d.kind === "audioinput");
+      console.log("Found audio devices:", audioInputs.map(d => ({ id: d.deviceId, label: d.label })));
+      setAudioDevices(audioInputs);
+
+      // If no device selected or saved device not found, use default
+      const savedDeviceId = localStorage.getItem("selected_audio_device") || "";
+      const deviceExists = audioInputs.some(d => d.deviceId === savedDeviceId);
+      if (!deviceExists && audioInputs.length > 0) {
+        console.log("Setting default device:", audioInputs[0].label);
+        setSelectedDeviceId(audioInputs[0].deviceId);
+        localStorage.setItem("selected_audio_device", audioInputs[0].deviceId);
+      }
+    } catch (err) {
+      console.error("Failed to load audio devices:", err);
+    }
+  }, []);
+
   // Load audio devices on mount
   useEffect(() => {
-    const loadDevices = async () => {
-      try {
-        console.log("Loading audio devices...");
-        // Request permission first to get device labels
-        await navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
-          stream.getTracks().forEach(track => track.stop());
-        });
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        const audioInputs = devices.filter(d => d.kind === "audioinput");
-        console.log("Found audio devices:", audioInputs.map(d => ({ id: d.deviceId, label: d.label })));
-        setAudioDevices(audioInputs);
-
-        // If no device selected or saved device not found, use default
-        const savedDeviceId = localStorage.getItem("selected_audio_device") || "";
-        const deviceExists = audioInputs.some(d => d.deviceId === savedDeviceId);
-        if (!deviceExists && audioInputs.length > 0) {
-          console.log("Setting default device:", audioInputs[0].label);
-          setSelectedDeviceId(audioInputs[0].deviceId);
-          localStorage.setItem("selected_audio_device", audioInputs[0].deviceId);
-        }
-      } catch (err) {
-        console.error("Failed to load audio devices:", err);
-      }
-    };
-    loadDevices();
+    loadAudioDevices();
 
     // Listen for device changes
-    navigator.mediaDevices.addEventListener("devicechange", loadDevices);
+    navigator.mediaDevices.addEventListener("devicechange", loadAudioDevices);
     return () => {
-      navigator.mediaDevices.removeEventListener("devicechange", loadDevices);
+      navigator.mediaDevices.removeEventListener("devicechange", loadAudioDevices);
     };
-  }, []);
+  }, [loadAudioDevices]);
 
   // Audio level monitoring
   const startAudioLevelMonitoring = useCallback(async (stream: MediaStream) => {
@@ -1167,7 +1169,14 @@ function App() {
                 {/* Microphone Dropdown */}
                 <div className="relative mt-2">
                   <button
-                    onClick={() => setShowDeviceDropdown(!showDeviceDropdown)}
+                    onClick={() => {
+                      const newState = !showDeviceDropdown;
+                      setShowDeviceDropdown(newState);
+                      // Refresh device list when opening dropdown
+                      if (newState) {
+                        loadAudioDevices();
+                      }
+                    }}
                     className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 transition-colors text-xs text-text-secondary"
                   >
                     <MicSmallIcon />
