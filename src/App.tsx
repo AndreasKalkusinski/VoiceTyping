@@ -45,13 +45,10 @@ const DEFAULT_MODELS: Record<STTProvider, STTModel[]> = {
     { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash" },
   ],
   openai: [
-    { id: "whisper-1", name: "Whisper" },
-    { id: "gpt-4o-transcribe", name: "GPT-4o Transcribe" },
     { id: "gpt-4o-mini-transcribe", name: "GPT-4o Mini Transcribe" },
   ],
   mistral: [
-    { id: "voxtral-mini-latest", name: "Voxtral Mini (3B)" },
-    { id: "voxtral-small-latest", name: "Voxtral Small (24B)" },
+    { id: "voxtral-mini-latest", name: "Voxtral Mini" },
   ],
 };
 
@@ -494,19 +491,39 @@ function App() {
           }
         }
       } else if (provider === "openai") {
-        // OpenAI doesn't have a models list endpoint for audio, use static list
-        models = [
-          { id: "whisper-1", name: "Whisper" },
-          { id: "gpt-4o-transcribe", name: "GPT-4o Transcribe" },
-          { id: "gpt-4o-mini-transcribe", name: "GPT-4o Mini Transcribe" },
-          { id: "gpt-4o-transcribe-diarize", name: "GPT-4o Diarize (Speaker)" },
-        ];
+        // Fetch OpenAI models and filter for audio/transcription models
+        const response = await fetch("https://api.openai.com/v1/models", {
+          headers: { Authorization: `Bearer ${config.apiKey}` }
+        });
+        if (response.ok) {
+          const data = await response.json();
+          const audioModels = data.data?.filter((m: { id: string }) =>
+            m.id.includes("whisper") || m.id.includes("transcribe")
+          ) || [];
+          if (audioModels.length > 0) {
+            models = audioModels.map((m: { id: string }) => ({
+              id: m.id,
+              name: m.id.replace(/-/g, " ").replace(/\b\w/g, (l: string) => l.toUpperCase()),
+            }));
+          }
+        }
       } else if (provider === "mistral") {
-        // Mistral audio models - Voxtral family
-        models = [
-          { id: "voxtral-mini-latest", name: "Voxtral Mini (3B)" },
-          { id: "voxtral-small-latest", name: "Voxtral Small (24B)" },
-        ];
+        // Fetch Mistral models and filter for Voxtral (audio) models
+        const response = await fetch("https://api.mistral.ai/v1/models", {
+          headers: { Authorization: `Bearer ${config.apiKey}` }
+        });
+        if (response.ok) {
+          const data = await response.json();
+          const voxtralModels = data.data?.filter((m: { id: string }) =>
+            m.id.toLowerCase().includes("voxtral")
+          ) || [];
+          if (voxtralModels.length > 0) {
+            models = voxtralModels.map((m: { id: string; name?: string }) => ({
+              id: m.id,
+              name: m.name || m.id.replace(/-/g, " ").replace(/\b\w/g, (l: string) => l.toUpperCase()),
+            }));
+          }
+        }
       }
 
       updateProviderConfig(provider, {
@@ -857,7 +874,7 @@ function App() {
 
       const formData = new FormData();
       formData.append("file", audioFile, "audio.webm");
-      formData.append("model", config.selectedModel || "whisper-1");
+      formData.append("model", config.selectedModel || "gpt-4o-mini-transcribe");
       formData.append("language", "de");
 
       const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
@@ -894,12 +911,17 @@ function App() {
       });
 
       const data = await response.json();
+      console.log("Mistral response:", data);
+
+      if (!response.ok) {
+        const errorMsg = data.message || data.error?.message || `HTTP ${response.status}`;
+        throw new Error(`Mistral API Error: ${errorMsg}`);
+      }
+
       if (data.text) {
         return data.text;
-      } else if (data.error) {
-        throw new Error(data.error.message || "Mistral API Error");
       }
-      throw new Error("Keine Antwort von Mistral");
+      throw new Error("Keine Antwort von Mistral - unerwartetes Format");
     }
 
     throw new Error("Unbekannter Provider");
