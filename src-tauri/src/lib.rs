@@ -62,6 +62,8 @@ pub fn run() {
                     "show" => {
                         if let Some(window) = app.get_webview_window("main") {
                             set_dock_visible(true);
+                            // On Windows, we need to unminimize first if minimized
+                            let _ = window.unminimize();
                             let _ = window.show();
                             let _ = window.set_focus();
                         }
@@ -81,6 +83,8 @@ pub fn run() {
                         let app = tray.app_handle();
                         if let Some(window) = app.get_webview_window("main") {
                             set_dock_visible(true);
+                            // On Windows, we need to unminimize first if minimized
+                            let _ = window.unminimize();
                             let _ = window.show();
                             let _ = window.set_focus();
                         }
